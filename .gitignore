@@ -1,0 +1,5 @@
+ragProjVenv/
+app/header.py
+db/
+app/__pycache__
+pdfData
