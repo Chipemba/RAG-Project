@@ -1,11 +1,14 @@
-from langchain.document_loaders import PyPDFLoader
+from langchain.document_loaders import PyPDFLoader, DirectoryLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings, ChatOllama
 from langchain.vectorstores import Chroma
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
 
+import base64
 import os
 import tempfile
 import uuid
@@ -14,42 +17,77 @@ import re
 import json
 
 
-def clean_filename(filename):
-    """
-    Cleans the filename removing numbers using regular expression.
-    Returns a new filename.
-    """
-    # Regular expression to find "(number)" pattern
-    new_filename = re.sub(r'\s\(\d+\)', '', filename)
-    return new_filename
+"""
+    Gets the urls in the urls.txt and begins saving the pages as pdf.
+    Uses selenium to printscreen and save the PDFs into the pdf folder. 
+"""
+def getUrls():
 
-def get_pdf_text(uploaded_file): 
-    """
-    Load a PDF document from an uploaded file and return it as a list of documents
+    with open('pdfData\articaleUrls.txt') as urlFile:
+        urls = urlFile.readlines()
+
+    return urls
+
+def saveUrlsAsPdfs(outputFolder="pdfData\pdfs"):
+    
+    urls = getUrls()
+
+    if not os.path.exists(outputFolder):
+        os.makedirs(outputFolder)
+
+    chrome_options = Options()
+    chrome_options.add_argument('--headless')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--print-to-pdf-no-header')  # optional
+
+    # Enable DevTools Protocol
+    chrome_prefs = {
+        'printing.print_preview_sticky_settings.appState': '{"recentDestinations":[{"id":"Save as PDF","origin":"local"}],"selectedDestinationId":"Save as PDF","version":2}'
+    }
+    chrome_options.add_experimental_option('prefs', chrome_prefs)
+    chrome_options.add_argument('--kiosk-printing')
+
+    driver = webdriver.Chrome(options=chrome_options)
+
+    for i, url in enumerate(urls):
+        try:
+            driver.get(url)
+            result = driver.execute_cdp_cmd("Page.printToPDF", {
+                "landscape": False,
+                "printBackground": True
+            })
+
+            pdf_data = base64.b64decode(result['data'])
+            file_name = f"retrievedPDF_{i+1}.pdf"
+            with open(os.path.join(outputFolder, file_name), "wb") as f:
+                f.write(pdf_data)
+            print(f"Saved: {file_name}")
+        except Exception as e:
+            print(f"Failed to save {url}: {e}")
+
+    driver.quit()
+
+
+"""
+    Load all the PDF documents from the pdf folder into the documents parameter.
     Parameters:
         uploaded_file (file-like object): The uploaded PDF file to load
     Returns:
-        list: A list of documents created from the uploaded PDF file
-    """
-    try:
-        # Read file content
-        input_file = uploaded_file.read()
+        list: A list of documents created from the uploaded PDF files
+"""
+def get_pdf_text(): 
 
-        # Create a temporary file (PyPDFLoader requires a file path to read the PDF,
-        # it can't work directly with file-like objects or byte streams that we get from Streamlit's uploaded_file)
-        temp_file = tempfile.NamedTemporaryFile(delete=False)
-        temp_file.write(input_file)
-        temp_file.close()
-
-        # load PDF document
-        loader = PyPDFLoader(temp_file.name)
-        documents = loader.load()
-
-        return documents
+    saveUrlsAsPdfs()
     
-    finally:
-        # Ensure the temporary file is deleted when we're done with it
-        os.unlink(temp_file.name)
+    loader = DirectoryLoader('pdfData\pdfs', glob = "./*.pdf", loader_cls= PyPDFLoader )
+    documents = loader.load()
+
+    return documents
+    
+    # finally:
+    #     # Ensure the temporary file is deleted when we're done with it
+    #     os.unlink(temp_file.name)
 
 
 def split_document(documents, chunk_size, chunk_overlap):    
@@ -142,6 +180,20 @@ def create_vectorstore_from_texts(documents, file_name):
     
     return vectorstore
 
+def clean_filename(filename):
+    """
+    Remove "(number)" pattern from a filename 
+    (because this could cause error when used as collection name when creating Chroma database).
+
+    Parameters:
+        filename (str): The filename to clean
+
+    Returns:
+        str: The cleaned filename
+    """
+    # Regular expression to find "(number)" pattern
+    new_filename = re.sub(r'\s\(\d+\)', '', filename)
+    return new_filename
 
 def load_vectorstore(file_name, vectorstore_path="db"):
 
@@ -161,7 +213,9 @@ def load_vectorstore(file_name, vectorstore_path="db"):
 
 # Prompt template
 PROMPT_TEMPLATE = """
-You are an assistant assisting with a job search.
+You are an chatbot assisting with answering frequently asked 
+question for a website that sales outdoor vehicles.
+Your main focus is only on dirt bikes.
 Use the following pieces of retrieved context to answer
 the question. If you don't know the answer, say that you
 don't know. DON'T MAKE UP ANYTHING.
@@ -170,36 +224,19 @@ don't know. DON'T MAKE UP ANYTHING.
 Answer the question based on the above context: {question}
 """
 
-# class AnswerWithSources(BaseModel):
-#     """An answer to the question, with sources and reasoning."""
-#     answer: str = Field(description="Answer to question")
-#     sources: str = Field(description="Full direct text chunk from the context used to answer the question")
-#     reasoning: str = Field(description="Explain the reasoning of the answer based on the sources")
-    
-
-# class ExtractedInfoWithSources(BaseModel):
-#     """Extracted information about the research article"""
-#     paper_title: AnswerWithSources
-#     paper_summary: AnswerWithSources
-#     publication_year: AnswerWithSources
-#     paper_authors: AnswerWithSources
-
 class AnswerWithSources(BaseModel):
     """An answer to the question, with sources and reasoning."""
     answer: str = Field(description="Answer to question")
     sources: str = Field(description="Full direct text chunk from the context used to answer the question")
+    # date: str = Field(description="When was the article published")
     reasoning: str = Field(description="Explain the reasoning of the answer based on the sources")
     
 
-class jobPostInfoWithSources(BaseModel):
+class ExtractedInfoWithSources(BaseModel):
     """Extracted information about the research article"""
-    job_title: AnswerWithSources
-    job_summary: AnswerWithSources
-    job_company: AnswerWithSources
-    job_companyAbout: AnswerWithSources
-    job_skills: AnswerWithSources
-    job_requiremet: AnswerWithSources
-
+    paper_title: AnswerWithSources
+    publication_date: AnswerWithSources
+    paper_authors: AnswerWithSources
 
 def format_docs(docs):
     """
@@ -222,7 +259,7 @@ def query_document(vectorstore, query):
 
     :return: A pandas DataFrame with three rows: 'answer', 'source', and 'reasoning'
     """
-    llm = ChatOllama(model="llama3.1", format=jobPostInfoWithSources.model_json_schema(),)
+    llm = ChatOllama(model="llama3.1", format=ExtractedInfoWithSources.model_json_schema(),)
 
     retriever=vectorstore.as_retriever(search_type="similarity")
 
